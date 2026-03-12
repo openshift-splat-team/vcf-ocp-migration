@@ -200,6 +200,13 @@ func (m *MachineManager) UpdateCPMSFailureDomain(ctx context.Context, failureDom
 		return fmt.Errorf("setting failure domain in CPMS: %w", err)
 	}
 
+	// Set the platform discriminator so the CPMS controller knows to process
+	// the vSphere failure domain list. This field is required (+unionDiscriminator)
+	// and may be absent when the original cluster did not use failure domains.
+	if err := unstructured.SetNestedField(cpms.Object, "VSphere", "spec", "template", "machines_v1beta1_machine_openshift_io", "failureDomains", "platform"); err != nil {
+		return fmt.Errorf("setting failure domain platform in CPMS: %w", err)
+	}
+
 	// Set state to Active.
 	if err := unstructured.SetNestedField(cpms.Object, "Active", "spec", "state"); err != nil {
 		return fmt.Errorf("setting CPMS state to Active: %w", err)
