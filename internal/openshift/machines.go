@@ -82,7 +82,7 @@ func (m *MachineManager) CreateWorkerMachineSet(ctx context.Context, name string
 	newMS.Spec.Template.Labels["machine.openshift.io/cluster-api-cluster"] = infraID
 
 	// Update the provider spec with the failure domain topology.
-	if err := updateMachineSetProviderSpec(newMS, failureDomain); err != nil {
+	if err := updateMachineSetProviderSpec(newMS, failureDomain, infraID); err != nil {
 		return nil, fmt.Errorf("updating provider spec for machineset %q: %w", name, err)
 	}
 
@@ -404,8 +404,10 @@ func (m *MachineManager) CheckNodesDeletedForMachines(ctx context.Context, machi
 }
 
 // updateMachineSetProviderSpec updates the VSphereMachineProviderSpec in the
-// MachineSet template with the topology from the given failure domain.
-func updateMachineSetProviderSpec(ms *machinev1beta1.MachineSet, fd *configv1.VSpherePlatformFailureDomainSpec) error {
+// MachineSet template with the topology from the given failure domain. When the
+// failure domain does not specify a folder, the default /<datacenter>/vm/<infraID>
+// path is used.
+func updateMachineSetProviderSpec(ms *machinev1beta1.MachineSet, fd *configv1.VSpherePlatformFailureDomainSpec, infraID string) error {
 	if ms == nil {
 		return fmt.Errorf("machineset must not be nil")
 	}
@@ -430,8 +432,15 @@ func updateMachineSetProviderSpec(ms *machinev1beta1.MachineSet, fd *configv1.VS
 	providerSpec.Workspace.Server = fd.Server
 	providerSpec.Workspace.Datacenter = fd.Topology.Datacenter
 	providerSpec.Workspace.Datastore = fd.Topology.Datastore
-	providerSpec.Workspace.Folder = fd.Topology.Folder
 	providerSpec.Workspace.ResourcePool = fd.Topology.ResourcePool
+
+	// Use the folder from the failure domain, or fall back to the default
+	// /<datacenter>/vm/<infraID> path that ensureDestinationInitialized creates.
+	if fd.Topology.Folder != "" {
+		providerSpec.Workspace.Folder = fd.Topology.Folder
+	} else {
+		providerSpec.Workspace.Folder = fmt.Sprintf("/%s/vm/%s", fd.Topology.Datacenter, infraID)
+	}
 
 	// Use the template from the migration manifest (target vCenter path), not the
 	// copied source MachineSet's template (old nested path).
