@@ -1,4 +1,3 @@
-
 When a user does not define a folder path, the folder needs to be created based on the infra id
 and then used within the defintion of the new machine set. See this example for the problem.
 

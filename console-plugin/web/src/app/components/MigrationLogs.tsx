@@ -12,7 +12,7 @@ import {
   SelectList,
   MenuToggle,
 } from '@patternfly/react-core';
-import { consoleFetchText } from '@openshift-console/dynamic-plugin-sdk';
+import { consoleFetchJSON, consoleFetchText } from '@openshift-console/dynamic-plugin-sdk';
 
 const OPERATOR_NAMESPACE = 'openshift-vcf-migration';
 const TAIL_LINES = 500;
@@ -36,10 +36,9 @@ export const MigrationLogs: React.FC = () => {
     let cancelled = false;
     const fetchPods = async () => {
       try {
-        const raw = await consoleFetchText(
+        const data = (await consoleFetchJSON(
           `/api/kubernetes/api/v1/namespaces/${OPERATOR_NAMESPACE}/pods?labelSelector=control-plane%3Dcontroller-manager`,
-        );
-        const data = JSON.parse(raw) as { items: PodItem[] };
+        )) as { items: PodItem[] };
         const names = data.items?.map((p) => p.metadata.name) ?? [];
         if (!cancelled) {
           setPods(names);
