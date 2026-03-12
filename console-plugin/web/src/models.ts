@@ -34,6 +34,17 @@ export const MachineModel: K8sModel = {
   namespaced: true,
 };
 
+export const ControlPlaneMachineSetModel: K8sModel = {
+  kind: 'ControlPlaneMachineSet',
+  label: 'ControlPlaneMachineSet',
+  labelPlural: 'ControlPlaneMachineSets',
+  apiGroup: 'machine.openshift.io',
+  apiVersion: 'v1',
+  plural: 'controlplanemachinesets',
+  abbr: 'cpms',
+  namespaced: true,
+};
+
 export const NodeModel: K8sModel = {
   kind: 'Node',
   label: 'Node',
