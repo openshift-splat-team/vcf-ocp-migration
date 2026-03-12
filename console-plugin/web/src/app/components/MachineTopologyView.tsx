@@ -7,6 +7,12 @@ import {
   EmptyStateHeader,
   EmptyStateIcon,
   EmptyStateBody,
+  Title,
+  PageSection,
+  DescriptionList,
+  DescriptionListGroup,
+  DescriptionListTerm,
+  DescriptionListDescription,
 } from '@patternfly/react-core';
 import {
   Table,
@@ -18,24 +24,22 @@ import {
 } from '@patternfly/react-table';
 import { CubesIcon } from '@patternfly/react-icons';
 import { useK8sWatchResource, ResourceLink } from '@openshift-console/dynamic-plugin-sdk';
+import {
+  MachineSetModel,
+  MachineModel,
+  NodeModel,
+  ControlPlaneMachineSetModel,
+} from '../../models';
+import { MachineTopologyGraph } from './MachineTopologyGraph';
 
-const machineSetGVK = {
-  group: 'machine.openshift.io',
-  version: 'v1beta1',
-  kind: 'MachineSet',
-};
+/* ------------------------------------------------------------------ */
+/* Types                                                               */
+/* ------------------------------------------------------------------ */
 
-const machineGVK = {
-  group: 'machine.openshift.io',
-  version: 'v1beta1',
-  kind: 'Machine',
-};
-
-const nodeGVK = {
-  group: '',
-  version: 'v1',
-  kind: 'Node',
-};
+/** Machine providerSpec.value.workspace — only the server field is needed. */
+interface VSphereMachineProviderSpec {
+  workspace?: { server?: string };
+}
 
 interface MachineSetKind {
   metadata: { name: string; namespace: string };
@@ -45,6 +49,7 @@ interface MachineSetKind {
 
 interface MachineKind {
   metadata: { name: string; namespace: string; labels?: Record<string, string> };
+  spec?: { providerSpec?: { value?: VSphereMachineProviderSpec } };
   status?: { phase?: string; nodeRef?: { name: string } };
 }
 
@@ -55,53 +60,107 @@ interface NodeKind {
   };
 }
 
-const machineAPINamespace = 'openshift-machine-api';
-
-export interface MachineTopologyViewProps {
-  namespace: string;
+interface CPMSKind {
+  metadata: { name: string; namespace: string };
+  spec: {
+    state?: string;
+    replicas?: number;
+  };
+  status?: {
+    replicas?: number;
+    updatedReplicas?: number;
+    readyReplicas?: number;
+  };
 }
 
-interface MachineRow {
+const machineAPINamespace = 'openshift-machine-api';
+
+/* ------------------------------------------------------------------ */
+/* Shared row type used by both tables and the topology graph          */
+/* ------------------------------------------------------------------ */
+
+export interface MachineRow {
   machineSetName: string | null;
-  machineSetNamespace: string;
   machineName: string;
   machineNamespace: string;
   machinePhase: string;
   nodeName: string | null;
   nodeReady: boolean | null;
-  role: string;
+  role: 'master' | 'worker';
+  vcenter: string;
 }
 
+/* ------------------------------------------------------------------ */
+/* Props                                                               */
+/* ------------------------------------------------------------------ */
+
+export interface MachineTopologyViewProps {
+  namespace: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Component                                                           */
+/* ------------------------------------------------------------------ */
+
 export const MachineTopologyView: React.FC<MachineTopologyViewProps> = () => {
+  /* K8s watches */
   const [machineSets, msLoaded] = useK8sWatchResource<MachineSetKind[]>({
-    groupVersionKind: machineSetGVK,
+    groupVersionKind: {
+      group: MachineSetModel.apiGroup,
+      version: MachineSetModel.apiVersion,
+      kind: MachineSetModel.kind,
+    },
     namespace: machineAPINamespace,
     isList: true,
     namespaced: true,
   });
   const [machines, mLoaded] = useK8sWatchResource<MachineKind[]>({
-    groupVersionKind: machineGVK,
+    groupVersionKind: {
+      group: MachineModel.apiGroup,
+      version: MachineModel.apiVersion,
+      kind: MachineModel.kind,
+    },
     namespace: machineAPINamespace,
     isList: true,
     namespaced: true,
   });
   const [nodes, nLoaded] = useK8sWatchResource<NodeKind[]>({
-    groupVersionKind: nodeGVK,
+    groupVersionKind: {
+      group: NodeModel.apiGroup,
+      version: NodeModel.apiVersion,
+      kind: NodeModel.kind,
+    },
     isList: true,
     namespaced: false,
   });
+  const [cpmsList, cpmsLoaded] = useK8sWatchResource<CPMSKind[]>({
+    groupVersionKind: {
+      group: ControlPlaneMachineSetModel.apiGroup,
+      version: ControlPlaneMachineSetModel.apiVersion,
+      kind: ControlPlaneMachineSetModel.kind,
+    },
+    namespace: machineAPINamespace,
+    isList: true,
+    namespaced: true,
+  });
 
-  const loaded = msLoaded && mLoaded && nLoaded;
+  const loaded = msLoaded && mLoaded && nLoaded && cpmsLoaded;
 
+  /* Build lookup maps */
   const nodeMap = React.useMemo(() => {
     const m: Record<string, NodeKind> = {};
     nodes?.forEach((n) => { m[n.metadata.name] = n; });
     return m;
   }, [nodes]);
 
+  const msNames = React.useMemo(
+    () => new Set(machineSets?.map((ms) => ms.metadata.name) ?? []),
+    [machineSets],
+  );
+
+  /* Build rows */
   const rows: MachineRow[] = React.useMemo(() => {
     if (!loaded) return [];
-    const msNames = new Set(machineSets?.map((ms) => ms.metadata.name) ?? []);
     const result: MachineRow[] = [];
 
     machines?.forEach((m) => {
@@ -114,27 +173,30 @@ export const MachineTopologyView: React.FC<MachineTopologyViewProps> = () => {
         const cond = node?.status?.conditions?.find((c) => c.type === 'Ready');
         nodeReady = cond?.status === 'True';
       }
+      const role: 'master' | 'worker' = roleLabel === 'master' ? 'master' : 'worker';
+      const vcenter = m.spec?.providerSpec?.value?.workspace?.server ?? 'unknown';
+
       result.push({
         machineSetName: msLabel && msNames.has(msLabel) ? msLabel : null,
-        machineSetNamespace: machineAPINamespace,
         machineName: m.metadata.name,
         machineNamespace: m.metadata.namespace,
         machinePhase: m.status?.phase ?? 'Unknown',
         nodeName,
         nodeReady,
-        role: roleLabel || (msLabel ? 'worker' : 'master'),
+        role,
+        vcenter,
       });
     });
 
-    result.sort((a, b) => {
-      if (a.role === 'master' && b.role !== 'master') return -1;
-      if (a.role !== 'master' && b.role === 'master') return 1;
-      return a.machineName.localeCompare(b.machineName);
-    });
-
+    result.sort((a, b) => a.machineName.localeCompare(b.machineName));
     return result;
-  }, [loaded, machines, machineSets, nodeMap]);
+  }, [loaded, machines, msNames, nodeMap]);
 
+  const controlPlaneRows = React.useMemo(() => rows.filter((r) => r.role === 'master'), [rows]);
+  const workerRows = React.useMemo(() => rows.filter((r) => r.role === 'worker'), [rows]);
+  const cpms = cpmsList?.[0] ?? null;
+
+  /* Loading */
   if (!loaded) {
     return (
       <Bullseye>
@@ -143,6 +205,7 @@ export const MachineTopologyView: React.FC<MachineTopologyViewProps> = () => {
     );
   }
 
+  /* Empty */
   if (!machines?.length) {
     return (
       <EmptyState>
@@ -159,31 +222,100 @@ export const MachineTopologyView: React.FC<MachineTopologyViewProps> = () => {
   }
 
   return (
+    <>
+      {/* Control Plane Section */}
+      <PageSection variant="light" className="pf-v5-u-pb-lg">
+        <Title headingLevel="h2" className="pf-v5-u-mb-md">Control Plane</Title>
+        {cpms && <CPMSSummary cpms={cpms} />}
+        <MachineTable rows={controlPlaneRows} />
+      </PageSection>
+
+      {/* Compute Section */}
+      <PageSection variant="light" className="pf-v5-u-pb-lg">
+        <Title headingLevel="h2" className="pf-v5-u-mb-md">Compute</Title>
+        <MachineTable rows={workerRows} />
+      </PageSection>
+
+      {/* Topology Graph */}
+      <PageSection variant="light">
+        <Title headingLevel="h2" className="pf-v5-u-mb-md">Topology</Title>
+        <MachineTopologyGraph rows={rows} />
+      </PageSection>
+    </>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* CPMS summary                                                        */
+/* ------------------------------------------------------------------ */
+
+const CPMSSummary: React.FC<{ cpms: CPMSKind }> = ({ cpms }) => (
+  <DescriptionList isHorizontal isCompact className="pf-v5-u-mb-md">
+    <DescriptionListGroup>
+      <DescriptionListTerm>ControlPlaneMachineSet</DescriptionListTerm>
+      <DescriptionListDescription>
+        <ResourceLink
+          groupVersionKind={{
+            group: ControlPlaneMachineSetModel.apiGroup,
+            version: ControlPlaneMachineSetModel.apiVersion,
+            kind: ControlPlaneMachineSetModel.kind,
+          }}
+          name={cpms.metadata.name}
+          namespace={cpms.metadata.namespace}
+        />
+      </DescriptionListDescription>
+    </DescriptionListGroup>
+    <DescriptionListGroup>
+      <DescriptionListTerm>State</DescriptionListTerm>
+      <DescriptionListDescription>
+        <Label color={cpms.spec.state === 'Active' ? 'green' : 'grey'} isCompact>
+          {cpms.spec.state ?? 'Unknown'}
+        </Label>
+      </DescriptionListDescription>
+    </DescriptionListGroup>
+    <DescriptionListGroup>
+      <DescriptionListTerm>Replicas</DescriptionListTerm>
+      <DescriptionListDescription>
+        {cpms.status?.readyReplicas ?? 0} / {cpms.spec.replicas ?? 0} ready
+      </DescriptionListDescription>
+    </DescriptionListGroup>
+  </DescriptionList>
+);
+
+/* ------------------------------------------------------------------ */
+/* Shared machine table                                                */
+/* ------------------------------------------------------------------ */
+
+const MachineTable: React.FC<{ rows: MachineRow[] }> = ({ rows }) => {
+  if (rows.length === 0) {
+    return <EmptyStateBody>No machines in this category.</EmptyStateBody>;
+  }
+
+  return (
     <Table aria-label="Machines" variant="compact">
       <Thead>
         <Tr>
-          <Th>Role</Th>
           <Th>MachineSet</Th>
           <Th>Machine</Th>
           <Th>Phase</Th>
           <Th>Node</Th>
           <Th>Status</Th>
+          <Th>vCenter</Th>
         </Tr>
       </Thead>
       <Tbody>
         {rows.map((row) => (
           <Tr key={row.machineName}>
-            <Td dataLabel="Role">
-              <Label color={row.role === 'master' ? 'purple' : 'blue'} isCompact>
-                {row.role}
-              </Label>
-            </Td>
             <Td dataLabel="MachineSet">
               {row.machineSetName ? (
                 <ResourceLink
-                  groupVersionKind={machineSetGVK}
+                  groupVersionKind={{
+                    group: MachineSetModel.apiGroup,
+                    version: MachineSetModel.apiVersion,
+                    kind: MachineSetModel.kind,
+                  }}
                   name={row.machineSetName}
-                  namespace={row.machineSetNamespace}
+                  namespace={machineAPINamespace}
                 />
               ) : (
                 <span className="pf-v5-u-color-200">-</span>
@@ -191,7 +323,11 @@ export const MachineTopologyView: React.FC<MachineTopologyViewProps> = () => {
             </Td>
             <Td dataLabel="Machine">
               <ResourceLink
-                groupVersionKind={machineGVK}
+                groupVersionKind={{
+                  group: MachineModel.apiGroup,
+                  version: MachineModel.apiVersion,
+                  kind: MachineModel.kind,
+                }}
                 name={row.machineName}
                 namespace={row.machineNamespace}
               />
@@ -204,7 +340,11 @@ export const MachineTopologyView: React.FC<MachineTopologyViewProps> = () => {
             <Td dataLabel="Node">
               {row.nodeName ? (
                 <ResourceLink
-                  groupVersionKind={nodeGVK}
+                  groupVersionKind={{
+                    group: NodeModel.apiGroup,
+                    version: NodeModel.apiVersion,
+                    kind: NodeModel.kind,
+                  }}
                   name={row.nodeName}
                 />
               ) : (
@@ -220,12 +360,21 @@ export const MachineTopologyView: React.FC<MachineTopologyViewProps> = () => {
                 <Label color="red" isCompact>Not Ready</Label>
               )}
             </Td>
+            <Td dataLabel="vCenter">
+              {row.vcenter !== 'unknown' ? row.vcenter : (
+                <span className="pf-v5-u-color-200">-</span>
+              )}
+            </Td>
           </Tr>
         ))}
       </Tbody>
     </Table>
   );
 };
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
 
 const getPhaseColor = (phase: string): 'blue' | 'green' | 'red' | 'grey' => {
   switch (phase) {

@@ -25,6 +25,11 @@ const config = {
           },
         ],
       },
+      {
+        test: /\.css$/,
+        include: /node_modules\/@patternfly\/react-topology/,
+        use: ['style-loader', 'css-loader'],
+      },
     ],
   },
   plugins: [
