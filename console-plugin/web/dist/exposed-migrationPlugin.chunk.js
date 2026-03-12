@@ -741,6 +741,8 @@ var Flex_index_js_ = __webpack_require__(6228);
 var ProgressStepper_index_js_ = __webpack_require__(9396);
 // EXTERNAL MODULE: consume shared module (default) @patternfly/react-core/dist/dynamic/components/Tabs@^5.0.0 (strict) (fallback: ./node_modules/@patternfly/react-core/dist/esm/components/Tabs/index.js)
 var Tabs_index_js_ = __webpack_require__(634);
+// EXTERNAL MODULE: consume shared module (default) @patternfly/react-icons/dist/dynamic/icons/download-icon@^5.0.0 (strict) (fallback: ./node_modules/@patternfly/react-icons/dist/esm/icons/download-icon.js)
+var download_icon_js_ = __webpack_require__(6783);
 // EXTERNAL MODULE: consume shared module (default) @patternfly/react-icons/dist/dynamic/icons/info-circle-icon@^5.0.0 (strict) (fallback: ./node_modules/@patternfly/react-icons/dist/esm/icons/info-circle-icon.js)
 var info_circle_icon_js_ = __webpack_require__(1769);
 ;// ./src/app/hooks/useMigrationEvents.ts
@@ -1304,6 +1306,7 @@ const MigrationLogs = () => {
 
 
 
+
 const MigrationDetailPage_migrationGVK = {
     group: 'migration.openshift.io',
     version: 'v1alpha1',
@@ -1391,6 +1394,23 @@ const MigrationDetailPage = () => {
             setActionError(`Failed to delete: ${e instanceof Error ? e.message : String(e)}`);
         }
     }, [migration, history]);
+    const handleDownloadMetadata = consume_shared_module_default_react_17_0_singleton_.useCallback(async () => {
+        if (!ns || !name)
+            return;
+        try {
+            const url = `/api/proxy/plugin/vcf-migration-console/vcf-migration-api/metadata?namespace=${encodeURIComponent(ns)}&name=${encodeURIComponent(name)}`;
+            const response = await (0,dynamic_plugin_sdk_1_8_singleton_.consoleFetch)(url);
+            const blob = await response.blob();
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `${name}-metadata.json`;
+            link.click();
+            URL.revokeObjectURL(link.href);
+        }
+        catch (e) {
+            setActionError(`Failed to download metadata: ${e instanceof Error ? e.message : String(e)}`);
+        }
+    }, [ns, name]);
     if (!ns || !name) {
         return ((0,jsx_runtime.jsxs)(index_js_.PageSection, { children: [(0,jsx_runtime.jsx)(Title_index_js_.Title, { headingLevel: "h1", children: "Migration not found" }), (0,jsx_runtime.jsx)(Button_index_js_.Button, { variant: "link", onClick: () => history.push('/vcf-migration'), children: "Back to list" })] }));
     }
@@ -1406,7 +1426,7 @@ const MigrationDetailPage = () => {
                                                                 ? new Date(migration.status.startTime).toLocaleString()
                                                                 : '-' })] }), (0,jsx_runtime.jsxs)(DescriptionList_index_js_.DescriptionListGroup, { children: [(0,jsx_runtime.jsx)(DescriptionList_index_js_.DescriptionListTerm, { children: "Completion time" }), (0,jsx_runtime.jsx)(DescriptionList_index_js_.DescriptionListDescription, { children: migration.status?.completionTime
                                                                 ? new Date(migration.status.completionTime).toLocaleString()
-                                                                : '-' })] })] }) })] }) }), (0,jsx_runtime.jsx)(Stack_index_js_.StackItem, { children: (0,jsx_runtime.jsxs)(Card_index_js_.Card, { children: [(0,jsx_runtime.jsx)(Card_index_js_.CardTitle, { children: "Migration progress" }), (0,jsx_runtime.jsx)(Card_index_js_.CardBody, { children: (0,jsx_runtime.jsx)(ProgressStepper_index_js_.ProgressStepper, { isVertical: true, children: conditionOrder.map((type) => {
+                                                                : '-' })] })] }) })] }) }), isConditionTrue('SourceCleaned') && ((0,jsx_runtime.jsx)(Stack_index_js_.StackItem, { children: (0,jsx_runtime.jsxs)(Card_index_js_.Card, { children: [(0,jsx_runtime.jsx)(Card_index_js_.CardTitle, { children: "Installer metadata" }), (0,jsx_runtime.jsxs)(Card_index_js_.CardBody, { children: [(0,jsx_runtime.jsx)(Button_index_js_.Button, { variant: "secondary", icon: (0,jsx_runtime.jsx)(download_icon_js_.DownloadIcon, {}), onClick: handleDownloadMetadata, children: "Download metadata.json" }), (0,jsx_runtime.jsxs)("p", { className: "pf-v5-u-mt-sm pf-v5-u-color-200", style: { fontSize: 'var(--pf-v5-global--FontSize--sm)' }, children: ["Replacement installer metadata with destination vCenter configuration. Use this file to destroy the cluster with ", (0,jsx_runtime.jsx)("code", { children: "openshift-install destroy cluster" }), "."] })] })] }) })), (0,jsx_runtime.jsx)(Stack_index_js_.StackItem, { children: (0,jsx_runtime.jsxs)(Card_index_js_.Card, { children: [(0,jsx_runtime.jsx)(Card_index_js_.CardTitle, { children: "Migration progress" }), (0,jsx_runtime.jsx)(Card_index_js_.CardBody, { children: (0,jsx_runtime.jsx)(ProgressStepper_index_js_.ProgressStepper, { isVertical: true, children: conditionOrder.map((type) => {
                                                 const cond = getCondition(type);
                                                 const isDone = isConditionTrue(type);
                                                 const isCurrent = cond?.status === 'False' &&
