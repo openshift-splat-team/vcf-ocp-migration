@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	configv1 "github.com/openshift/api/config/v1"
 	configclient "github.com/openshift/client-go/config/clientset/versioned"
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -494,10 +495,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 		}
 	}
 
-	// If we are past Step 4 (CPMS updated), run Steps 5–7 (rollout and scale-down) from cluster state.
+	// If we are past Step 3 (CPMS updated), run Steps 4–6 (rollout and scale-down) from cluster state.
 	if c := apimeta.FindStatusCondition(migration.Status.Conditions, condType); c != nil {
-		pastStep4 := strings.HasPrefix(c.Message, "CPMS updated") || strings.Contains(c.Message, "Control plane rollout") || strings.Contains(c.Message, "Old workers")
-		if pastStep4 {
+		pastCPMSUpdate := strings.HasPrefix(c.Message, "CPMS updated") || strings.Contains(c.Message, "Control plane rollout") || strings.Contains(c.Message, "Old workers")
+		if pastCPMSUpdate {
 			return r.ensureWorkloadMigratedRolloutAndScaleDown(ctx, migration)
 		}
 	}
@@ -573,59 +574,25 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 	}
 
 	// Step 2: Wait for target worker machines and nodes to be ready (cluster state).
-	allReady := true
-	for i := range migration.Spec.FailureDomains {
-		msName := fmt.Sprintf("%s-worker-%s", infraID, migration.Spec.FailureDomains[i].Name)
-		machinesReady, readyCount, totalCount, err := machineMgr.CheckMachinesReady(ctx, msName)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("checking machines for %q: %w", msName, err)
-		}
-		if !machinesReady {
-			log.V(1).Info("machines not ready", "machineSet", msName, "ready", readyCount, "total", totalCount)
-			allReady = false
-			continue
-		}
-		nodesReady, nodeReadyCount, nodeTotalCount, err := machineMgr.CheckNodesReady(ctx, msName)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("checking nodes for %q: %w", msName, err)
-		}
-		if !nodesReady {
-			log.V(1).Info("nodes not ready", "machineSet", msName, "ready", nodeReadyCount, "total", nodeTotalCount)
-			allReady = false
-		}
+	allReady, err := checkWorkerReadiness(ctx, machineMgr, migration.Spec.FailureDomains, infraID)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 	if !allReady {
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Workers created, waiting for machines ready")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Step 3: Delete CPMS once so it can be recreated. Use condition message to
-	// avoid deleting again after recreation (idempotent across restarts).
-	cond := apimeta.FindStatusCondition(migration.Status.Conditions, condType)
-	alreadyDeletedCPMS := cond != nil && (strings.HasPrefix(cond.Message, "CPMS deleted") || strings.HasPrefix(cond.Message, "CPMS updated") || strings.Contains(cond.Message, "Control plane rollout") || strings.Contains(cond.Message, "Old workers"))
-	cpms, err := machineMgr.GetControlPlaneMachineSet(ctx)
-	if err == nil && cpms != nil && !alreadyDeletedCPMS {
-		if err := machineMgr.DeleteControlPlaneMachineSet(ctx); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("deleting CPMS: %w", err)
-		}
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "CPMS deleted, waiting for recreation")
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	}
-	if err != nil && !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("checking CPMS: %w", err)
-	}
-	if err != nil || cpms == nil {
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "CPMS deleted, waiting for recreation")
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	}
-
-	// Step 4: Update CPMS with target failure domain (idempotent).
-	targetFD := migration.Spec.FailureDomains[0].Name
-	if err := machineMgr.UpdateCPMSFailureDomain(ctx, targetFD); err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating CPMS failure domain: %w", err)
+	// Step 3: Update CPMS with target failure domains and set state to Active.
+	// The CPMS is updated in place — no delete/recreate needed. The CPMS operator
+	// resolves failure domain topology from the Infrastructure resource and triggers
+	// a rolling replacement of control plane machines.
+	targetFDNames := failureDomainNames(migration.Spec.FailureDomains)
+	if err := machineMgr.UpdateCPMSFailureDomain(ctx, targetFDNames); err != nil {
+		return ctrl.Result{}, fmt.Errorf("updating CPMS failure domains: %w", err)
 	}
 	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "CPMS updated, waiting for generation observed")
-	r.Recorder.Event(migration, "Normal", "CPMSUpdated", fmt.Sprintf("CPMS updated with failure domain %q", targetFD))
+	r.Recorder.Event(migration, "Normal", "CPMSUpdated", fmt.Sprintf("CPMS updated with failure domains %v", targetFDNames))
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
 
@@ -941,4 +908,40 @@ func (r *VmwareCloudFoundationMigrationReconciler) SetupWithManager(mgr ctrl.Man
 		For(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
 		Named("vmwarecloudfoundationmigration").
 		Complete(r)
+}
+
+// failureDomainNames extracts the name from each failure domain spec.
+func failureDomainNames(fds []configv1.VSpherePlatformFailureDomainSpec) []string {
+	names := make([]string, len(fds))
+	for i := range fds {
+		names[i] = fds[i].Name
+	}
+	return names
+}
+
+// checkWorkerReadiness verifies that all machines and nodes for the target worker
+// MachineSets are in a ready state. It returns true when every MachineSet's machines
+// are Running with a NodeRef and the corresponding nodes have condition Ready=True.
+func checkWorkerReadiness(ctx context.Context, machineMgr *openshift.MachineManager, fds []configv1.VSpherePlatformFailureDomainSpec, infraID string) (bool, error) {
+	log := klog.FromContext(ctx)
+	for i := range fds {
+		msName := fmt.Sprintf("%s-worker-%s", infraID, fds[i].Name)
+		machinesReady, readyCount, totalCount, err := machineMgr.CheckMachinesReady(ctx, msName)
+		if err != nil {
+			return false, fmt.Errorf("checking machines for %q: %w", msName, err)
+		}
+		if !machinesReady {
+			log.V(1).Info("machines not ready", "machineSet", msName, "ready", readyCount, "total", totalCount)
+			return false, nil
+		}
+		nodesReady, nodeReadyCount, nodeTotalCount, err := machineMgr.CheckNodesReady(ctx, msName)
+		if err != nil {
+			return false, fmt.Errorf("checking nodes for %q: %w", msName, err)
+		}
+		if !nodesReady {
+			log.V(1).Info("nodes not ready", "machineSet", msName, "ready", nodeReadyCount, "total", nodeTotalCount)
+			return false, nil
+		}
+	}
+	return true, nil
 }
