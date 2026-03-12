@@ -35,6 +35,7 @@ func New(port, certFile, keyFile, staticDir string, h *handlers.Handler) (*Serve
 	mux.HandleFunc("/vsphere/templates", h.ServeVSphereTemplates)
 	mux.HandleFunc("/vsphere/folders", h.ServeVSphereFolders)
 	mux.HandleFunc("/events", h.ServeEventsSSE)
+	mux.HandleFunc("/metadata", h.ServeMetadataDownload)
 
 	// Static assets: serve everything from staticDir at /
 	fs := http.FileServer(http.Dir(staticDir))
@@ -49,7 +50,7 @@ func New(port, certFile, keyFile, staticDir string, h *handlers.Handler) (*Serve
 			}
 		}
 		// Let API routes take precedence (already registered above).
-		if strings.HasPrefix(r.URL.Path, "/vsphere/") || r.URL.Path == "/events" {
+		if strings.HasPrefix(r.URL.Path, "/vsphere/") || r.URL.Path == "/events" || r.URL.Path == "/metadata" {
 			http.NotFound(w, r)
 			return
 		}

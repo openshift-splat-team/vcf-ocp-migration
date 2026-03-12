@@ -786,11 +786,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 		return ctrl.Result{}, fmt.Errorf("generating metadata: %w", err)
 	}
 
-	cmName := metadata.GetMetadataConfigMapName(migration.Name)
-	if err := metadataMgr.SaveToConfigMap(ctx, md, migration.Namespace, cmName); err != nil {
+	secretName := metadata.GetMetadataSecretName(migration.Name)
+	if err := metadataMgr.SaveToSecret(ctx, md, migration.Namespace, secretName); err != nil {
 		return ctrl.Result{}, fmt.Errorf("saving metadata: %w", err)
 	}
-	log.V(1).Info("metadata saved", "configMap", cmName)
+	log.V(1).Info("metadata saved", "secret", secretName)
 
 	// Re-enable CVO only after vCenter list and config have been updated (above).
 	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Re-enabling Cluster Version Operator")

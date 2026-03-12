@@ -12,6 +12,9 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// MetadataKey is the key used to store the metadata JSON in the Secret.
+const MetadataKey = "metadata.json"
+
 // Metadata holds the installer metadata for a cluster, used for generating
 // configuration that maps vCenter resources to OpenShift infrastructure.
 type Metadata struct {
@@ -128,46 +131,65 @@ func (m *MetadataManager) GenerateMetadata(ctx context.Context, failureDomains [
 	return md, nil
 }
 
-// SaveToConfigMap persists the metadata as JSON in a ConfigMap with the given
-// namespace and name. If the ConfigMap already exists, it is updated.
-func (m *MetadataManager) SaveToConfigMap(ctx context.Context, metadata *Metadata, namespace, name string) error {
+// SaveToSecret persists the metadata as JSON in a Secret with the given
+// namespace and name. If the Secret already exists, it is updated.
+// A Secret is used instead of a ConfigMap because the metadata contains
+// vCenter credentials.
+func (m *MetadataManager) SaveToSecret(ctx context.Context, md *Metadata, namespace, name string) error {
 	log := klog.FromContext(ctx)
-	log.V(2).Info("saving metadata to ConfigMap", "namespace", namespace, "name", name)
+	log.V(2).Info("saving metadata to Secret", "namespace", namespace, "name", name)
 
-	data, err := json.Marshal(metadata)
+	data, err := json.Marshal(md)
 	if err != nil {
 		return fmt.Errorf("marshalling metadata: %w", err)
 	}
 
-	cm := &corev1.ConfigMap{
+	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
+			Labels: map[string]string{
+				"migration.openshift.io/metadata": "true",
+			},
 		},
-		Data: map[string]string{
-			"metadata.json": string(data),
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			MetadataKey: data,
 		},
 	}
 
-	existing, err := m.kubeClient.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+	existing, err := m.kubeClient.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
-		existing.Data = cm.Data
-		if _, err := m.kubeClient.CoreV1().ConfigMaps(namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("updating metadata ConfigMap %s/%s: %w", namespace, name, err)
+		existing.Data = secret.Data
+		if _, err := m.kubeClient.CoreV1().Secrets(namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("updating metadata Secret %s/%s: %w", namespace, name, err)
 		}
 	} else {
-		if _, err := m.kubeClient.CoreV1().ConfigMaps(namespace).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-			return fmt.Errorf("creating metadata ConfigMap %s/%s: %w", namespace, name, err)
+		if _, err := m.kubeClient.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("creating metadata Secret %s/%s: %w", namespace, name, err)
 		}
 	}
 
-	log.V(2).Info("saved metadata to ConfigMap", "namespace", namespace, "name", name)
+	log.V(2).Info("saved metadata to Secret", "namespace", namespace, "name", name)
 	return nil
 }
 
-// GetMetadataConfigMapName returns the conventional ConfigMap name for storing
+// GetMetadataFromSecret reads the metadata JSON from a Secret.
+func (m *MetadataManager) GetMetadataFromSecret(ctx context.Context, namespace, name string) ([]byte, error) {
+	secret, err := m.kubeClient.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("getting metadata Secret %s/%s: %w", namespace, name, err)
+	}
+	data, ok := secret.Data[MetadataKey]
+	if !ok {
+		return nil, fmt.Errorf("key %q not found in Secret %s/%s", MetadataKey, namespace, name)
+	}
+	return data, nil
+}
+
+// GetMetadataSecretName returns the conventional Secret name for storing
 // migration metadata based on the migration resource name.
-func GetMetadataConfigMapName(migrationName string) string {
+func GetMetadataSecretName(migrationName string) string {
 	return fmt.Sprintf("%s-metadata", migrationName)
 }
 

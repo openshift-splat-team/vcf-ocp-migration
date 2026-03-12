@@ -32,7 +32,8 @@ import {
   Tabs,
   TabTitleText,
 } from '@patternfly/react-core';
-import { useK8sWatchResource, k8sPatch, k8sDelete, ResourceYAMLEditor } from '@openshift-console/dynamic-plugin-sdk';
+import { DownloadIcon } from '@patternfly/react-icons';
+import { useK8sWatchResource, k8sPatch, k8sDelete, ResourceYAMLEditor, consoleFetch } from '@openshift-console/dynamic-plugin-sdk';
 import { VmwareCloudFoundationMigrationModel } from '../../models';
 import type { VmwareCloudFoundationMigrationKind } from '../../models';
 import { EventStream } from '../components/EventStream';
@@ -134,6 +135,22 @@ export const MigrationDetailPage: React.FC = () => {
       setActionError(`Failed to delete: ${e instanceof Error ? e.message : String(e)}`);
     }
   }, [migration, history]);
+
+  const handleDownloadMetadata = React.useCallback(async () => {
+    if (!ns || !name) return;
+    try {
+      const url = `/api/proxy/plugin/vcf-migration-console/vcf-migration-api/metadata?namespace=${encodeURIComponent(ns)}&name=${encodeURIComponent(name)}`;
+      const response = await consoleFetch(url);
+      const blob = await (response as Response).blob();
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `${name}-metadata.json`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (e) {
+      setActionError(`Failed to download metadata: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [ns, name]);
 
   if (!ns || !name) {
     return (
@@ -290,6 +307,27 @@ export const MigrationDetailPage: React.FC = () => {
                 </CardBody>
               </Card>
             </StackItem>
+
+            {isConditionTrue('SourceCleaned') && (
+              <StackItem>
+                <Card>
+                  <CardTitle>Installer metadata</CardTitle>
+                  <CardBody>
+                    <Button
+                      variant="secondary"
+                      icon={<DownloadIcon />}
+                      onClick={handleDownloadMetadata}
+                    >
+                      Download metadata.json
+                    </Button>
+                    <p className="pf-v5-u-mt-sm pf-v5-u-color-200" style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)' }}>
+                      Replacement installer metadata with destination vCenter configuration.
+                      Use this file to destroy the cluster with <code>openshift-install destroy cluster</code>.
+                    </p>
+                  </CardBody>
+                </Card>
+              </StackItem>
+            )}
 
             <StackItem>
               <Card>
