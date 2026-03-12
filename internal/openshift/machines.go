@@ -6,13 +6,12 @@ import (
 	"fmt"
 
 	configv1 "github.com/openshift/api/config/v1"
+	machinev1 "github.com/openshift/api/machine/v1"
 	machinev1beta1 "github.com/openshift/api/machine/v1beta1"
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -22,13 +21,6 @@ const (
 	// MachineAPINamespace is the namespace used by the Machine API components.
 	MachineAPINamespace = "openshift-machine-api"
 )
-
-// cpmsGVR is the GroupVersionResource for ControlPlaneMachineSet.
-var cpmsGVR = schema.GroupVersionResource{
-	Group:    "machine.openshift.io",
-	Version:  "v1",
-	Resource: "controlplanemachinesets",
-}
 
 // MachineManager manages Machine API resources including MachineSets and
 // ControlPlaneMachineSets.
@@ -157,66 +149,56 @@ func (m *MachineManager) ScaleMachineSet(ctx context.Context, name string, repli
 	return nil
 }
 
-// GetControlPlaneMachineSet retrieves the ControlPlaneMachineSet using the dynamic client.
-func (m *MachineManager) GetControlPlaneMachineSet(ctx context.Context) (*unstructured.Unstructured, error) {
-	cpms, err := m.dynamicClient.Resource(cpmsGVR).Namespace(MachineAPINamespace).Get(ctx, "cluster", metav1.GetOptions{})
+// GetControlPlaneMachineSet retrieves the ControlPlaneMachineSet named "cluster"
+// from the openshift-machine-api namespace using the typed machine client.
+func (m *MachineManager) GetControlPlaneMachineSet(ctx context.Context) (*machinev1.ControlPlaneMachineSet, error) {
+	cpms, err := m.machineClient.MachineV1().ControlPlaneMachineSets(MachineAPINamespace).Get(ctx, "cluster", metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("getting ControlPlaneMachineSet: %w", err)
 	}
 	return cpms, nil
 }
 
-// DeleteControlPlaneMachineSet deletes the ControlPlaneMachineSet.
-func (m *MachineManager) DeleteControlPlaneMachineSet(ctx context.Context) error {
+// UpdateCPMSFailureDomain updates the ControlPlaneMachineSet in place: it sets the
+// vSphere failure domain references, the platform discriminator, and the state to
+// Active. This triggers the CPMS operator to roll out control plane machines into
+// the specified failure domains.
+//
+// The failureDomainNames correspond to failure domains defined in the cluster's
+// Infrastructure resource (config.openshift.io/v1). The CPMS operator resolves
+// topology (vCenter, datacenter, datastore, etc.) from those definitions.
+func (m *MachineManager) UpdateCPMSFailureDomain(ctx context.Context, failureDomainNames []string) error {
 	log := klog.FromContext(ctx)
-	log.V(2).Info("deleting ControlPlaneMachineSet")
-
-	if err := m.dynamicClient.Resource(cpmsGVR).Namespace(MachineAPINamespace).Delete(ctx, "cluster", metav1.DeleteOptions{}); err != nil {
-		return fmt.Errorf("deleting ControlPlaneMachineSet: %w", err)
-	}
-
-	log.V(2).Info("deleted ControlPlaneMachineSet")
-	return nil
-}
-
-// UpdateCPMSFailureDomain updates the failure domain name in the ControlPlaneMachineSet
-// template and sets its state to Active.
-func (m *MachineManager) UpdateCPMSFailureDomain(ctx context.Context, failureDomainName string) error {
-	log := klog.FromContext(ctx)
-	log.V(2).Info("updating CPMS failure domain", "failureDomain", failureDomainName)
+	log.V(2).Info("updating CPMS failure domains", "failureDomains", failureDomainNames)
 
 	cpms, err := m.GetControlPlaneMachineSet(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Set the failure domain in the template.
-	failureDomains := []map[string]interface{}{
-		{
-			"name": failureDomainName,
-		},
-	}
-	if err := unstructured.SetNestedSlice(cpms.Object, toInterfaceSlice(failureDomains), "spec", "template", "machines_v1beta1_machine_openshift_io", "failureDomains", "vsphere"); err != nil {
-		return fmt.Errorf("setting failure domain in CPMS: %w", err)
+	tmpl := cpms.Spec.Template.OpenShiftMachineV1Beta1Machine
+	if tmpl == nil {
+		return fmt.Errorf("CPMS has no machines_v1beta1_machine_openshift_io template")
 	}
 
-	// Set the platform discriminator so the CPMS controller knows to process
-	// the vSphere failure domain list. This field is required (+unionDiscriminator)
-	// and may be absent when the original cluster did not use failure domains.
-	if err := unstructured.SetNestedField(cpms.Object, "VSphere", "spec", "template", "machines_v1beta1_machine_openshift_io", "failureDomains", "platform"); err != nil {
-		return fmt.Errorf("setting failure domain platform in CPMS: %w", err)
+	// Build the vSphere failure domain list.
+	vsphereFDs := make([]machinev1.VSphereFailureDomain, len(failureDomainNames))
+	for i, name := range failureDomainNames {
+		vsphereFDs[i] = machinev1.VSphereFailureDomain{Name: name}
 	}
 
-	// Set state to Active.
-	if err := unstructured.SetNestedField(cpms.Object, "Active", "spec", "state"); err != nil {
-		return fmt.Errorf("setting CPMS state to Active: %w", err)
+	tmpl.FailureDomains = &machinev1.FailureDomains{
+		Platform: configv1.VSpherePlatformType,
+		VSphere:  vsphereFDs,
 	}
 
-	if _, err := m.dynamicClient.Resource(cpmsGVR).Namespace(MachineAPINamespace).Update(ctx, cpms, metav1.UpdateOptions{}); err != nil {
+	cpms.Spec.State = machinev1.ControlPlaneMachineSetStateActive
+
+	if _, err := m.machineClient.MachineV1().ControlPlaneMachineSets(MachineAPINamespace).Update(ctx, cpms, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("updating ControlPlaneMachineSet: %w", err)
 	}
 
-	log.V(2).Info("updated CPMS failure domain", "failureDomain", failureDomainName)
+	log.V(2).Info("updated CPMS failure domains", "failureDomains", failureDomainNames)
 	return nil
 }
 
@@ -230,13 +212,9 @@ func (m *MachineManager) CheckControlPlaneRolloutStatus(ctx context.Context) (co
 		return false, 0, 0, 0, err
 	}
 
-	statusReplicas, _, _ := unstructured.NestedInt64(cpms.Object, "status", "replicas")
-	statusUpdated, _, _ := unstructured.NestedInt64(cpms.Object, "status", "updatedReplicas")
-	statusReady, _, _ := unstructured.NestedInt64(cpms.Object, "status", "readyReplicas")
-
-	replicas = int32(statusReplicas)
-	updatedReplicas = int32(statusUpdated)
-	readyReplicas = int32(statusReady)
+	replicas = cpms.Status.Replicas
+	updatedReplicas = cpms.Status.UpdatedReplicas
+	readyReplicas = cpms.Status.ReadyReplicas
 
 	complete = replicas > 0 && updatedReplicas == replicas && readyReplicas == replicas
 	log.V(2).Info("CPMS rollout status", "complete", complete, "replicas", replicas, "updatedReplicas", updatedReplicas, "readyReplicas", readyReplicas)
@@ -253,10 +231,7 @@ func (m *MachineManager) IsCPMSGenerationObserved(ctx context.Context) (bool, er
 		return false, err
 	}
 
-	generation := cpms.GetGeneration()
-	observedGeneration, _, _ := unstructured.NestedInt64(cpms.Object, "status", "observedGeneration")
-
-	return generation == observedGeneration, nil
+	return cpms.Generation == cpms.Status.ObservedGeneration, nil
 }
 
 // machinesetSelectorLabel returns the label value used to select machines for the
@@ -483,14 +458,4 @@ func extractVSphereProviderSpec(ms *machinev1beta1.MachineSet) (*machinev1beta1.
 	}
 
 	return providerSpec, nil
-}
-
-// toInterfaceSlice converts a slice of maps to a slice of interface{} for use with
-// unstructured.SetNestedSlice.
-func toInterfaceSlice(in []map[string]interface{}) []interface{} {
-	out := make([]interface{}, len(in))
-	for i, v := range in {
-		out[i] = v
-	}
-	return out
 }
